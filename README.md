@@ -49,10 +49,3 @@ from mobilelab.algorithms import plume
 ### `mobilelab.algorithms`
 - **`plume`** — Plume identification and characterization routines
 
-## Contributing
-
-Pull requests are welcome. For major changes, please open an issue first.
-
-## License
-
-[MIT](LICENSE)
