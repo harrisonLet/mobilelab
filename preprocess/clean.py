@@ -1,331 +1,295 @@
 """
-clean_picarro.py
+clean.py
 ----------------
-Clean and standardize raw Picarro G2301/G4302 CSV files.
+Interactive Picarro CSV cleaner.
 
-Usage
------
-    python clean_picarro.py --input data/raw/picarro/SLV_20260210.dat
-    python clean_picarro.py --input data/raw/picarro/SLV_20260210.dat \\
-        --timestamp epoch \\
-        --keep CH4_sync CH4_dry_sync CO2_sync H2O_sync \\
-        --output output/picarro_clean/20260210_picarro.csv
+Usage:
+    python clean.py <input_file.dat>
 
-Timestamp methods
------------------
-    datetime  : (default) combine DATE + TIME columns → "2026-02-10 21:00:02"
-    epoch     : use EPOCH_TIME (Unix seconds UTC)
-    julian    : use JULIAN_DAYS column
-    frac_days : use FRAC_DAYS_SINCE_JAN1
+The script will prompt you for:
+  1. Number of header lines to skip
+  2. Which data columns to keep
+  3. How to build the timestamp index
 
-Column selection
-----------------
-    Default keep set (--keep not specified):
-        CO_sync, CO2_sync, CO2_dry_sync, CH4_sync, CH4_dry_sync, H2O_sync
-
-    Pass any subset on the CLI, e.g.:
-        --keep CH4_sync CH4_dry_sync H2O_sync
+Output: a cleaned CSV with a single TIMESTAMP index and your chosen columns.
 
 Harrison LeTourneau, U of Utah, 2026
 """
 
-import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 
-# ── Column name standardization map ──────────────────────────────────────────
-# Maps raw Picarro column names → standardized output names.
-# Add entries here if your instrument variant uses different raw names.
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-STANDARD_NAMES = {
-    "CO_sync":      "CO (ppm)",
-    "CO2_sync":     "CO2 (ppm)",
-    "CO2_dry_sync": "CO2_dry (ppm)",
-    "CH4_sync":     "CH4 (ppm)",
-    "CH4_dry_sync": "CH4_dry (ppm)",
-    "H2O_sync":     "H2O (ppm)",
-    # Cavity diagnostics — kept if user requests them explicitly
-    "CavityPressure": "CavityPressure (Torr)",
-    "CavityTemp":     "CavityTemp (C)",
-    "AmbientPressure":"AmbientPressure (Torr)",
-}
-
-DEFAULT_KEEP = [
-    "CO_sync",
-    "CO2_sync",
-    "CO2_dry_sync",
-    "CH4_sync",
-    "CH4_dry_sync",
-    "H2O_sync",
-]
-
-TIMESTAMP_METHODS = ("datetime", "epoch", "julian", "frac_days")
+def prompt(msg: str, default: str | None = None) -> str:
+    suffix = f" [{default}]" if default is not None else ""
+    while True:
+        val = input(f"{msg}{suffix}: ").strip()
+        if val == "" and default is not None:
+            return default
+        if val != "":
+            return val
+        print("  Please enter a value.")
 
 
-# ── Core reader ───────────────────────────────────────────────────────────────
+def prompt_int(msg: str, default: int | None = None) -> int:
+    while True:
+        raw = prompt(msg, str(default) if default is not None else None)
+        try:
+            return int(raw)
+        except ValueError:
+            print(f"  '{raw}' is not a valid integer. Try again.")
 
-def read_picarro(filepath: str | Path) -> pd.DataFrame:
-    """
-    Read a raw Picarro whitespace-delimited data file into a DataFrame.
-    Handles the wide whitespace padding Picarro uses between columns.
 
-    Returns a raw DataFrame with original column names intact.
-    Numeric columns that Picarro writes in scientific notation are cast to float.
-    """
-    path = Path(filepath)
-    if not path.exists():
-        raise FileNotFoundError(f"Picarro file not found: {path}")
+def prompt_choice(msg: str, choices: list[str], default: str | None = None) -> str:
+    choices_lower = [c.lower() for c in choices]
+    while True:
+        raw = prompt(msg, default).lower()
+        if raw in choices_lower:
+            return raw
+        print(f"  Invalid choice. Options: {choices}")
 
+
+def section(title: str):
+    width = 60
+    print("\n" + "─" * width)
+    print(f"  {title}")
+    print("─" * width)
+
+
+# ── Step 1: Read with user-specified header skip ──────────────────────────────
+
+def read_with_skip(filepath: Path, skiprows: int) -> pd.DataFrame:
     df = pd.read_csv(
-        path,
-        sep=r"\s+",       # any whitespace run as delimiter
+        filepath,
+        sep=r"\s+",
         engine="python",
+        skiprows=skiprows,
         na_values=["nan", "NaN", "NA", "", "N/A"],
     )
-
-    # Strip any stray whitespace from column names
     df.columns = [c.strip() for c in df.columns]
-
-    print(f"[read_picarro] {path.name}: {len(df):,} rows, {len(df.columns)} columns")
     return df
 
 
-# ── Timestamp builders ────────────────────────────────────────────────────────
+# ── Step 2: Column selection ──────────────────────────────────────────────────
 
-def build_timestamp_datetime(df: pd.DataFrame) -> pd.Series:
-    """
-    Combine DATE and TIME columns.
-    Expected formats: DATE='2026-02-03', TIME='21:00:02.000'
-    """
-    if "DATE" not in df.columns or "TIME" not in df.columns:
-        raise KeyError("Method 'datetime' requires DATE and TIME columns in the file.")
+def select_columns(df: pd.DataFrame) -> list[str]:
+    # Exclude obvious timestamp-related columns from the data menu
+    ts_keywords = {"date", "time", "epoch", "julian", "frac", "timestamp"}
+    data_cols = [
+        c for c in df.columns
+        if not any(kw in c.lower() for kw in ts_keywords)
+    ]
 
-    combined = df["DATE"].astype(str).str.strip() + " " + df["TIME"].astype(str).str.strip()
-    ts = pd.to_datetime(combined, format="%Y-%m-%d %H:%M:%S.%f", errors="coerce")
+    print("\n  Available data columns:\n")
+    for i, col in enumerate(data_cols, 1):
+        # Show a quick sample value for context
+        sample = df[col].dropna().iloc[0] if df[col].dropna().shape[0] > 0 else "N/A"
+        print(f"    [{i:>2}]  {col:<35}  (e.g. {sample})")
 
-    # Fallback: try without fractional seconds
-    mask = ts.isna()
-    if mask.any():
-        ts[mask] = pd.to_datetime(combined[mask], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    print()
+    print("  Enter column numbers separated by spaces (e.g. 1 3 5),")
+    print("  or press Enter to keep ALL of them.")
 
-    n_bad = ts.isna().sum()
-    if n_bad:
-        print(f"  [warn] {n_bad} timestamp rows could not be parsed and will be NaT.")
+    while True:
+        raw = input("  Your selection: ").strip()
+        if raw == "":
+            return data_cols
+        try:
+            indices = [int(x) for x in raw.split()]
+            if all(1 <= i <= len(data_cols) for i in indices):
+                selected = [data_cols[i - 1] for i in indices]
+                print(f"\n  Keeping: {selected}")
+                return selected
+            else:
+                print(f"  Numbers must be between 1 and {len(data_cols)}. Try again.")
+        except ValueError:
+            print("  Please enter integers only.")
+
+
+# ── Step 3: Timestamp building ────────────────────────────────────────────────
+
+def find_cols(df: pd.DataFrame, keyword: str) -> list[str]:
+    """Return column names that contain a keyword (case-insensitive)."""
+    return [c for c in df.columns if keyword.lower() in c.lower()]
+
+
+def build_timestamp(df: pd.DataFrame) -> pd.Series:
+    section("STEP 3 of 3 — Timestamp / Index")
+
+    # Show what timestamp-ish columns exist
+    ts_keywords = ["date", "time", "epoch", "julian", "frac"]
+    ts_cols = [
+        c for c in df.columns
+        if any(kw in c.lower() for kw in ts_keywords)
+    ]
+    print("\n  Detected timestamp-related columns:")
+    for c in ts_cols:
+        sample = df[c].iloc[0] if len(df) > 0 else "N/A"
+        print(f"    {c:<35}  (e.g. {sample})")
+
+    print()
+    print("  How would you like to build the timestamp index?")
+    print("    [1]  epoch   — single column of Unix seconds (e.g. EPOCH_TIME)")
+    print("    [2]  combine — combine a DATE column + a TIME column")
+    method = prompt_choice("\n  Choice", ["1", "2", "epoch", "combine"])
+
+    if method in ("1", "epoch"):
+        return _build_epoch(df, ts_cols)
+    else:
+        return _build_combine(df, ts_cols)
+
+
+def _build_epoch(df: pd.DataFrame, ts_cols: list[str]) -> pd.Series:
+    epoch_candidates = [c for c in ts_cols if "epoch" in c.lower()]
+    if epoch_candidates:
+        default_col = epoch_candidates[0]
+    else:
+        default_col = ts_cols[0] if ts_cols else None
+
+    col = prompt(
+        "\n  Enter the epoch column name",
+        default_col,
+    )
+    if col not in df.columns:
+        raise KeyError(f"Column '{col}' not found in file.")
+
+    print(f"  Parsing '{col}' as Unix seconds (UTC) → tz-naive datetime.")
+    ts = pd.to_datetime(df[col].astype(float), unit="s", utc=True).dt.tz_localize(None)
     return ts
 
 
-def build_timestamp_epoch(df: pd.DataFrame) -> pd.Series:
-    """
-    Convert EPOCH_TIME (Unix seconds, UTC) to a tz-naive UTC datetime.
-    """
-    if "EPOCH_TIME" not in df.columns:
-        raise KeyError("Method 'epoch' requires EPOCH_TIME column in the file.")
-    return pd.to_datetime(df["EPOCH_TIME"].astype(float), unit="s", utc=True).dt.tz_localize(None)
+def _build_combine(df: pd.DataFrame, ts_cols: list[str]) -> pd.Series:
+    date_candidates = [c for c in ts_cols if "date" in c.lower()]
+    time_candidates = [c for c in ts_cols if "time" in c.lower() and "epoch" not in c.lower()]
+
+    date_col = prompt(
+        "\n  Date column name",
+        date_candidates[0] if date_candidates else None,
+    )
+    time_col = prompt(
+        "  Time column name",
+        time_candidates[0] if time_candidates else None,
+    )
+
+    for col in (date_col, time_col):
+        if col not in df.columns:
+            raise KeyError(f"Column '{col}' not found in file.")
+
+    # Show samples so the user can figure out the right format
+    print(f"\n  Sample DATE values : {df[date_col].iloc[:3].tolist()}")
+    print(f"  Sample TIME values : {df[time_col].iloc[:3].tolist()}")
+    print()
+    print("  Enter the combined datetime format string.")
+    print("  Examples:")
+    print("    %Y-%m-%d %H:%M:%S       →  2026-02-10 21:00:02")
+    print("    %Y-%m-%d %H:%M:%S.%f    →  2026-02-10 21:00:02.123")
+    print("    %m/%d/%Y %I:%M:%S %p    →  02/10/2026 09:00:02 PM")
+    print("  (The date and time values will be joined with a single space.)")
+
+    fmt = prompt(
+        "  Format string",
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    combined = (
+        df[date_col].astype(str).str.strip()
+        + " "
+        + df[time_col].astype(str).str.strip()
+    )
+
+    ts = pd.to_datetime(combined, format=fmt, errors="coerce")
+
+    n_bad = ts.isna().sum()
+    if n_bad > 0:
+        print(f"\n  [warn] {n_bad} rows failed to parse and will be dropped.")
+
+    return ts
 
 
-def build_timestamp_julian(df: pd.DataFrame) -> pd.Series:
-    """
-    Convert JULIAN_DAYS to datetime.
-    Picarro JULIAN_DAYS is fractional Julian Day Number (JDN).
-    J2000.0 epoch = 2000-01-01 12:00:00 UTC = JD 2451545.0
-    """
-    if "JULIAN_DAYS" not in df.columns:
-        raise KeyError("Method 'julian' requires JULIAN_DAYS column in the file.")
-    j2000_jd = 2451545.0
-    j2000_dt = pd.Timestamp("2000-01-01 12:00:00")
-    delta_days = df["JULIAN_DAYS"].astype(float) - j2000_jd
-    return j2000_dt + pd.to_timedelta(delta_days, unit="D")
+# ── Main ──────────────────────────────────────────────────────────────────────
 
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python clean.py <input_file.dat>")
+        sys.exit(1)
 
-def build_timestamp_frac_days(df: pd.DataFrame) -> pd.Series:
-    """
-    Convert FRAC_DAYS_SINCE_JAN1 to datetime using the year inferred from DATE.
-    Day 1.0 = Jan 1 00:00:00 of that year.
-    """
-    if "FRAC_DAYS_SINCE_JAN1" not in df.columns:
-        raise KeyError("Method 'frac_days' requires FRAC_DAYS_SINCE_JAN1 column.")
-    if "DATE" not in df.columns:
-        raise KeyError("Method 'frac_days' also requires DATE to infer the year.")
+    filepath = Path(sys.argv[1])
+    if not filepath.exists():
+        print(f"Error: file not found — {filepath}")
+        sys.exit(1)
 
-    year = pd.to_datetime(df["DATE"].iloc[0].strip()).year
-    jan1 = pd.Timestamp(f"{year}-01-01")
-    # Picarro frac_days: day 1.0 = Jan 1 00:00:00, so offset = (frac - 1) days
-    delta = df["FRAC_DAYS_SINCE_JAN1"].astype(float) - 1.0
-    return jan1 + pd.to_timedelta(delta, unit="D")
+    print(f"\n{'═' * 60}")
+    print(f"  Picarro Cleaner")
+    print(f"  File: {filepath.name}")
+    print(f"{'═' * 60}")
 
+    # ── Step 1: Header skip ───────────────────────────────────────────────────
+    section("STEP 1 of 3 — Header Lines")
 
-TIMESTAMP_BUILDERS = {
-    "datetime":  build_timestamp_datetime,
-    "epoch":     build_timestamp_epoch,
-    "julian":    build_timestamp_julian,
-    "frac_days": build_timestamp_frac_days,
-}
+    # Peek at first 10 lines so the user can see the structure
+    print("\n  First 10 lines of the file:\n")
+    max_content = 72  # chars of line content before truncating
+    with open(filepath) as f:
+        for i, line in enumerate(f):
+            if i >= 10:
+                break
+            content = line.rstrip("\n")
+            if len(content) > max_content:
+                content = content[:max_content] + " ..."
+            print(f"  {i:>3}  {content}")
+    print()
 
+    print("\n  How many lines should be skipped before the column-name row?")
+    print("  (e.g. if row 0 is already the header, enter 0)")
+    skiprows = prompt_int("  Lines to skip", default=0)
 
-# ── Main cleaning function ────────────────────────────────────────────────────
+    # Try to read with that skip value
+    try:
+        df = read_with_skip(filepath, skiprows)
+    except Exception as e:
+        print(f"\n  Error reading file: {e}")
+        sys.exit(1)
 
-def clean_picarro(
-    filepath: str | Path,
-    timestamp_method: str = "datetime",
-    keep_columns: list[str] | None = None,
-    output_path: str | Path | None = None,
-) -> pd.DataFrame:
-    """
-    Load, clean, and standardize a Picarro data file.
+    print(f"\n  Read {len(df):,} rows, {len(df.columns)} columns.")
+    print(f"  Column names detected: {df.columns.tolist()}")
 
-    Parameters
-    ----------
-    filepath : str or Path
-        Path to the raw Picarro .dat / .csv file.
+    # ── Step 2: Column selection ──────────────────────────────────────────────
+    section("STEP 2 of 3 — Data Columns to Keep")
+    keep_cols = select_columns(df)
 
-    timestamp_method : str
-        One of: 'datetime', 'epoch', 'julian', 'frac_days'.
-        See module docstring for details.
+    # ── Step 3: Timestamp ─────────────────────────────────────────────────────
+    ts = build_timestamp(df)
 
-    keep_columns : list of str, optional
-        Raw Picarro column names to retain (before renaming).
-        Defaults to DEFAULT_KEEP (the six sync gas columns).
+    # ── Assemble clean DataFrame ──────────────────────────────────────────────
+    df_clean = df[keep_cols].copy()
 
-    output_path : str or Path, optional
-        If provided, write the cleaned DataFrame to this CSV path.
-
-    Returns
-    -------
-    pd.DataFrame
-        Cleaned DataFrame with TIMESTAMP index and standardized column names.
-    """
-    if timestamp_method not in TIMESTAMP_METHODS:
-        raise ValueError(
-            f"Unknown timestamp method '{timestamp_method}'. "
-            f"Choose from: {TIMESTAMP_METHODS}"
-        )
-
-    if keep_columns is None:
-        keep_columns = DEFAULT_KEEP
-
-    # ── 1. Read raw file
-    df = read_picarro(filepath)
-
-    # ── 2. Validate requested keep columns exist
-    missing = [c for c in keep_columns if c not in df.columns]
-    if missing:
-        available = [c for c in df.columns if c not in ("DATE", "TIME")]
-        print(f"  [warn] Requested columns not found in file: {missing}")
-        print(f"  Available columns: {available}")
-        keep_columns = [c for c in keep_columns if c in df.columns]
-        if not keep_columns:
-            raise ValueError("No valid data columns remain after filtering.")
-
-    # ── 3. Build timestamp
-    print(f"  Building timestamp using method: '{timestamp_method}'")
-    ts = TIMESTAMP_BUILDERS[timestamp_method](df)
-
-    # ── 4. Subset to desired columns only
-    df_clean = df[keep_columns].copy()
-
-    # ── 5. Cast all data columns to float (Picarro writes scientific notation)
     for col in df_clean.columns:
         df_clean[col] = pd.to_numeric(df_clean[col], errors="coerce")
 
-    # ── 6. Apply standard column names (only for columns in the map)
-    rename = {c: STANDARD_NAMES[c] for c in df_clean.columns if c in STANDARD_NAMES}
-    df_clean.rename(columns=rename, inplace=True)
-
-    # ── 7. Set TIMESTAMP index
     df_clean.insert(0, "TIMESTAMP", ts.values)
     df_clean.set_index("TIMESTAMP", inplace=True)
     df_clean.index.name = "TIMESTAMP"
 
-    # ── 8. Drop NaT index rows and duplicates
+    # Drop unparseable timestamps and duplicates
     df_clean = df_clean[~df_clean.index.isna()]
     df_clean = df_clean[~df_clean.index.duplicated(keep="first")]
     df_clean.sort_index(inplace=True)
 
-    print(
-        f"  Cleaned: {len(df_clean):,} records | "
-        f"columns: {df_clean.columns.tolist()}"
-    )
+    print(f"\n  ✓  Clean DataFrame ready: {len(df_clean):,} rows × {len(df_clean.columns)} columns")
+    print(f"     Columns: {df_clean.columns.tolist()}")
+    print(f"     Time range: {df_clean.index[0]}  →  {df_clean.index[-1]}")
 
-    # ── 9. Optionally write output
-    if output_path is not None:
-        out = Path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        df_clean.to_csv(out)
-        print(f"  Saved → {out}")
-
-    return df_clean
-
-
-# ── CLI ───────────────────────────────────────────────────────────────────────
-
-def _parse_args():
-    parser = argparse.ArgumentParser(
-        description="Clean and standardize a raw Picarro data file.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-    parser.add_argument(
-        "--input", "-i",
-        required=True,
-        help="Path to raw Picarro .dat or .csv file.",
-    )
-    parser.add_argument(
-        "--timestamp", "-t",
-        default="datetime",
-        choices=TIMESTAMP_METHODS,
-        help=(
-            "Method for building the TIMESTAMP index. "
-            "datetime=DATE+TIME (default), epoch=EPOCH_TIME, "
-            "julian=JULIAN_DAYS, frac_days=FRAC_DAYS_SINCE_JAN1."
-        ),
-    )
-    parser.add_argument(
-        "--keep", "-k",
-        nargs="+",
-        default=None,
-        metavar="COL",
-        help=(
-            "Raw Picarro column names to keep. "
-            f"Defaults to: {DEFAULT_KEEP}. "
-            "Example: --keep CH4_sync CH4_dry_sync H2O_sync"
-        ),
-    )
-    parser.add_argument(
-        "--output", "-o",
-        default=None,
-        help=(
-            "Output CSV path. If omitted, prints summary only "
-            "(useful for inspecting what columns are available)."
-        ),
-    )
-    parser.add_argument(
-        "--list-columns",
-        action="store_true",
-        help="Print all column names found in the file and exit.",
-    )
-    return parser.parse_args()
-
-
-def main():
-    args = _parse_args()
-
-    if args.list_columns:
-        df_raw = read_picarro(args.input)
-        print("\nAll columns in file:")
-        for col in df_raw.columns:
-            print(f"  {col}")
-        sys.exit(0)
-
-    clean_picarro(
-        filepath=args.input,
-        timestamp_method=args.timestamp,
-        keep_columns=args.keep,
-        output_path=args.output,
-    )
+    # ── Output ────────────────────────────────────────────────────────────────
+    section("OUTPUT")
+    default_out = filepath.stem + "_clean.csv"
+    out_path = Path(prompt("  Output file path", default_out))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df_clean.to_csv(out_path)
+    print(f"\n  ✓  Saved → {out_path}\n")
 
 
 if __name__ == "__main__":
