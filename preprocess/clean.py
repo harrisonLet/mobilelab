@@ -23,6 +23,7 @@ Harrison LeTourneau, U of Utah, 2026
 """
 
 import sys
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -71,10 +72,10 @@ def section(title: str):
 def read_with_skip(filepath: Path, skiprows: int) -> pd.DataFrame:
     df = pd.read_csv(
         filepath,
-        sep=r"\s+",
+        sep=",",
         engine="python",
         skiprows=skiprows,
-        na_values=["nan", "NaN", "NA", "", "N/A"],
+        na_values=["nan", "NaN", "NA", "", "
     )
     df.columns = [c.strip() for c in df.columns]
     return df
@@ -413,7 +414,7 @@ def run_single(filepath: Path) -> None:
 
 # ── Batch directory mode ──────────────────────────────────────────────────────
 
-def run_batch(dirpath: Path) -> None:
+def run_batch(dirpath: Path, offsets: dict[str, float] | None = None) -> None:
     # Collect all files in the directory (non-recursive), sorted
     candidates = sorted(
         p for p in dirpath.iterdir()
@@ -487,12 +488,17 @@ def run_batch(dirpath: Path) -> None:
             print(f"    [skip] Timestamp error: {e}")
             continue
 
-        raw = input(f"    Time shift in seconds [0]: ").strip()
-        try:
-            shift_sec = float(raw) if raw else 0.0
-        except ValueError:
-            print(f"    Could not parse '{raw}' — no shift applied.")
-            shift_sec = 0.0
+        # Use offsets.json value if available, otherwise prompt
+        if offsets and filepath.name in offsets:
+            shift_sec = float(offsets[filepath.name])
+            print(f"    Time shift from offsets.json: {shift_sec:+g}s")
+        else:
+            raw = input(f"    Time shift in seconds [0]: ").strip()
+            try:
+                shift_sec = float(raw) if raw else 0.0
+            except ValueError:
+                print(f"    Could not parse '{raw}' — no shift applied.")
+                shift_sec = 0.0
 
         try:
             df_clean = assemble(df, col_map, ts, shift_sec)
@@ -528,18 +534,33 @@ def _peek(filepath: Path) -> None:
 def main():
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python clean.py <input_file.dat>     — single file")
-        print("  python clean.py <directory/>         — batch all files in dir")
+        print("  python clean.py <input_file.dat>              — single file")
+        print("  python clean.py <directory/>                  — batch, prompt per file")
+        print("  python clean.py <directory/> --offsets f.json — batch, offsets from JSON")
         sys.exit(1)
 
-    target = Path(sys.argv[1])
+    # Parse --offsets flag if present
+    offsets: dict[str, float] = {}
+    args = sys.argv[1:]
+    if "--offsets" in args:
+        idx = args.index("--offsets")
+        offsets_path = Path(args[idx + 1])
+        args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
+        if not offsets_path.exists():
+            print(f"Error: offsets file not found — {offsets_path}")
+            sys.exit(1)
+        with open(offsets_path) as fh:
+            offsets = json.load(fh)
+        print(f"Loaded offsets for {len(offsets)} file(s) from {offsets_path.name}")
+
+    target = Path(args[0])
 
     if not target.exists():
         print(f"Error: path not found — {target}")
         sys.exit(1)
 
     if target.is_dir():
-        run_batch(target)
+        run_batch(target, offsets=offsets)
     else:
         run_single(target)
 
