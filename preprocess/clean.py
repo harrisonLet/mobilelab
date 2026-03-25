@@ -3,15 +3,21 @@ clean.py
 ----------------
 Interactive Picarro CSV cleaner.
 
-Usage:
+Single file:
     python clean.py <input_file.dat>
 
-The script will prompt you for:
-  1. Number of header lines to skip
-  2. Which data columns to keep
-  3. How to build the timestamp index
+    Prompts for header skip, columns, timestamp format, time shift,
+    and output path.
 
-Output: a cleaned CSV with a single TIMESTAMP index and your chosen columns.
+Batch directory:
+    python clean.py <directory/>
+
+    Uses the first file in the directory to configure header skip,
+    columns, and timestamp format (same for all files), then prompts
+    for a per-file time shift and output path for each file.
+
+Output: cleaned CSV(s) with a single TIMESTAMP index and chosen columns,
+        formatted as YYYY-MM-DD HH:MM:SS.ffffff.
 
 Harrison LeTourneau, U of Utah, 2026
 """
@@ -76,8 +82,11 @@ def read_with_skip(filepath: Path, skiprows: int) -> pd.DataFrame:
 
 # ── Step 2: Column selection ──────────────────────────────────────────────────
 
-def select_columns(df: pd.DataFrame) -> list[str]:
-    # Exclude obvious timestamp-related columns from the data menu
+def select_columns(df: pd.DataFrame) -> dict[str, str]:
+    """
+    Returns an ordered dict of  { original_col_name: output_col_name }.
+    The output name is either the original or a user-supplied rename.
+    """
     ts_keywords = {"date", "time", "epoch", "julian", "frac", "timestamp"}
     data_cols = [
         c for c in df.columns
@@ -86,42 +95,111 @@ def select_columns(df: pd.DataFrame) -> list[str]:
 
     print("\n  Available data columns:\n")
     for i, col in enumerate(data_cols, 1):
-        # Show a quick sample value for context
         sample = df[col].dropna().iloc[0] if df[col].dropna().shape[0] > 0 else "N/A"
         print(f"    [{i:>2}]  {col:<35}  (e.g. {sample})")
 
     print()
-    print("  Enter column numbers separated by spaces (e.g. 1 3 5),")
-    print("  or press Enter to keep ALL of them.")
+    print("  Enter column numbers separated by spaces to keep them.")
+    print("  To rename a column, follow its number with a colon and the new name.")
+    print("  Examples:  1 2 3          (keep as-is)")
+    print("             1 2:CO2_ppm 3  (rename column 2)")
+    print("  Press Enter to keep ALL columns with original names.")
 
     while True:
-        raw = input("  Your selection: ").strip()
+        raw = input("\n  Your selection: ").strip()
+
+        # Keep all with original names
         if raw == "":
-            return data_cols
-        try:
-            indices = [int(x) for x in raw.split()]
-            if all(1 <= i <= len(data_cols) for i in indices):
-                selected = [data_cols[i - 1] for i in indices]
-                print(f"\n  Keeping: {selected}")
-                return selected
+            return {c: c for c in data_cols}
+
+        result: dict[str, str] = {}
+        valid = True
+
+        for token in raw.split():
+            if ":" in token:
+                num_part, new_name = token.split(":", 1)
+                new_name = new_name.strip()
             else:
-                print(f"  Numbers must be between 1 and {len(data_cols)}. Try again.")
-        except ValueError:
-            print("  Please enter integers only.")
+                num_part = token
+                new_name = None
+
+            try:
+                idx = int(num_part)
+            except ValueError:
+                print(f"  '{num_part}' is not a valid column number. Try again.")
+                valid = False
+                break
+
+            if not (1 <= idx <= len(data_cols)):
+                print(f"  Column number {idx} is out of range (1–{len(data_cols)}). Try again.")
+                valid = False
+                break
+
+            orig = data_cols[idx - 1]
+            result[orig] = new_name if new_name else orig
+
+        if not valid:
+            continue
+
+        print("\n  Columns to keep:")
+        for orig, out in result.items():
+            if orig != out:
+                print(f"    {orig}  →  {out}")
+            else:
+                print(f"    {orig}")
+        return result
 
 
 # ── Step 3: Timestamp building ────────────────────────────────────────────────
 
-def find_cols(df: pd.DataFrame, keyword: str) -> list[str]:
-    """Return column names that contain a keyword (case-insensitive)."""
-    return [c for c in df.columns if keyword.lower() in c.lower()]
+# Output format is always this — no exceptions.
+TIMESTAMP_OUT_FMT = "%Y-%m-%d %H:%M:%S.%f"
 
 
-def build_timestamp(df: pd.DataFrame) -> pd.Series:
+class TimestampConfig:
+    """Captures the user's timestamp choices so they can be replayed on other files."""
+    def __init__(self, method: str, **kwargs):
+        self.method = method   # "epoch" | "split" | "single"
+        self.params = kwargs   # col, date_col, time_col, fmt, etc.
+
+    def apply(self, df: pd.DataFrame) -> "pd.Series":
+        if self.method == "epoch":
+            col = self.params["col"]
+            return pd.to_datetime(
+                df[col].astype(float), unit="s", utc=True
+            ).dt.tz_localize(None)
+
+        elif self.method == "split":
+            date_col = self.params["date_col"]
+            time_col = self.params["time_col"]
+            fmt      = self.params["fmt"]
+            combined = (
+                df[date_col].astype(str).str.strip()
+                + " "
+                + df[time_col].astype(str).str.strip()
+            )
+            return pd.to_datetime(combined, format=fmt, errors="coerce")
+
+        elif self.method == "single":
+            col = self.params["col"]
+            fmt = self.params.get("fmt", None)
+            return pd.to_datetime(
+                df[col].astype(str).str.strip(), format=fmt, errors="coerce"
+            )
+
+        else:
+            raise ValueError(f"Unknown timestamp method: {self.method}")
+
+
+def build_timestamp(df: pd.DataFrame) -> tuple["pd.Series", TimestampConfig]:
+    """
+    Interactively configure the timestamp.
+    Returns (parsed Series, TimestampConfig) so the config can be
+    replayed on other files without prompting again.
+    """
     section("STEP 3 of 3 — Timestamp / Index")
 
-    # Show what timestamp-ish columns exist
-    ts_keywords = ["date", "time", "epoch", "julian", "frac"]
+    ts_keywords = ["date", "time", "epoch", "julian", "frac", "timestamp"]
     ts_cols = [
         c for c in df.columns
         if any(kw in c.lower() for kw in ts_keywords)
@@ -132,107 +210,308 @@ def build_timestamp(df: pd.DataFrame) -> pd.Series:
         print(f"    {c:<35}  (e.g. {sample})")
 
     print()
-    print("  How would you like to build the timestamp index?")
-    print("    [1]  epoch   — single column of Unix seconds (e.g. EPOCH_TIME)")
-    print("    [2]  combine — combine a DATE column + a TIME column")
-    method = prompt_choice("\n  Choice", ["1", "2", "epoch", "combine"])
+    print("  How is the timestamp stored in this file?")
+    print("    [1]  epoch    — one column of Unix seconds  (e.g. 1738620000.123)")
+    print("    [2]  split    — separate DATE and TIME columns")
+    print("    [3]  single   — one column that already contains the full datetime")
+    method = prompt_choice("\n  Choice", ["1", "2", "3", "epoch", "split", "single"])
 
     if method in ("1", "epoch"):
-        return _build_epoch(df, ts_cols)
+        ts, cfg = _build_epoch(df, ts_cols)
+    elif method in ("2", "split"):
+        ts, cfg = _build_split(df, ts_cols)
     else:
-        return _build_combine(df, ts_cols)
+        ts, cfg = _build_single(df, ts_cols)
+
+    ts = pd.to_datetime(ts, errors="coerce")
+    if hasattr(ts.dt, "tz") and ts.dt.tz is not None:
+        ts = ts.dt.tz_localize(None)
+
+    n_bad = ts.isna().sum()
+    if n_bad:
+        print(f"\n  [warn] {n_bad} rows could not be parsed and will be dropped.")
+
+    good = ts.dropna()
+    if len(good):
+        print(f"\n  Preview — first parsed timestamp: {good.iloc[0]}")
+        print(f"  Output format will be:  YYYY-MM-DD HH:MM:SS.ffffff")
+
+    return ts, cfg
 
 
-def _build_epoch(df: pd.DataFrame, ts_cols: list[str]) -> pd.Series:
+def _build_epoch(df: pd.DataFrame, ts_cols: list[str]) -> tuple["pd.Series", TimestampConfig]:
     epoch_candidates = [c for c in ts_cols if "epoch" in c.lower()]
-    if epoch_candidates:
-        default_col = epoch_candidates[0]
-    else:
-        default_col = ts_cols[0] if ts_cols else None
+    default_col = epoch_candidates[0] if epoch_candidates else (ts_cols[0] if ts_cols else None)
 
-    col = prompt(
-        "\n  Enter the epoch column name",
-        default_col,
-    )
+    col = prompt("\n  Epoch column name", default_col)
     if col not in df.columns:
         raise KeyError(f"Column '{col}' not found in file.")
 
     print(f"  Parsing '{col}' as Unix seconds (UTC) → tz-naive datetime.")
-    ts = pd.to_datetime(df[col].astype(float), unit="s", utc=True).dt.tz_localize(None)
-    return ts
+    cfg = TimestampConfig("epoch", col=col)
+    return cfg.apply(df), cfg
 
 
-def _build_combine(df: pd.DataFrame, ts_cols: list[str]) -> pd.Series:
+def _build_split(df: pd.DataFrame, ts_cols: list[str]) -> tuple["pd.Series", TimestampConfig]:
     date_candidates = [c for c in ts_cols if "date" in c.lower()]
     time_candidates = [c for c in ts_cols if "time" in c.lower() and "epoch" not in c.lower()]
 
-    date_col = prompt(
-        "\n  Date column name",
-        date_candidates[0] if date_candidates else None,
-    )
-    time_col = prompt(
-        "  Time column name",
-        time_candidates[0] if time_candidates else None,
-    )
+    date_col = prompt("\n  Date column name", date_candidates[0] if date_candidates else None)
+    time_col = prompt("  Time column name", time_candidates[0] if time_candidates else None)
 
     for col in (date_col, time_col):
         if col not in df.columns:
             raise KeyError(f"Column '{col}' not found in file.")
 
-    # Show samples so the user can figure out the right format
     print(f"\n  Sample DATE values : {df[date_col].iloc[:3].tolist()}")
     print(f"  Sample TIME values : {df[time_col].iloc[:3].tolist()}")
     print()
-    print("  Enter the combined datetime format string.")
+    print("  Enter the strptime format for the combined DATE + TIME string.")
+    print("  (They will be joined with a single space before parsing.)")
     print("  Examples:")
     print("    %Y-%m-%d %H:%M:%S       →  2026-02-10 21:00:02")
-    print("    %Y-%m-%d %H:%M:%S.%f    →  2026-02-10 21:00:02.123")
+    print("    %Y-%m-%d %H:%M:%S.%f    →  2026-02-10 21:00:02.123456")
     print("    %m/%d/%Y %I:%M:%S %p    →  02/10/2026 09:00:02 PM")
-    print("  (The date and time values will be joined with a single space.)")
 
-    fmt = prompt(
-        "  Format string",
-        "%Y-%m-%d %H:%M:%S",
-    )
-
-    combined = (
-        df[date_col].astype(str).str.strip()
-        + " "
-        + df[time_col].astype(str).str.strip()
-    )
-
-    ts = pd.to_datetime(combined, format=fmt, errors="coerce")
-
-    n_bad = ts.isna().sum()
-    if n_bad > 0:
-        print(f"\n  [warn] {n_bad} rows failed to parse and will be dropped.")
-
-    return ts
+    fmt = prompt("  Format string", "%Y-%m-%d %H:%M:%S")
+    cfg = TimestampConfig("split", date_col=date_col, time_col=time_col, fmt=fmt)
+    return cfg.apply(df), cfg
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+def _build_single(df: pd.DataFrame, ts_cols: list[str]) -> tuple["pd.Series", TimestampConfig]:
+    dt_candidates = [
+        c for c in ts_cols
+        if any(kw in c.lower() for kw in ("datetime", "timestamp"))
+    ]
+    default_col = dt_candidates[0] if dt_candidates else (ts_cols[0] if ts_cols else None)
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python clean.py <input_file.dat>")
-        sys.exit(1)
+    col = prompt("\n  Datetime column name", default_col)
+    if col not in df.columns:
+        raise KeyError(f"Column '{col}' not found in file.")
 
-    filepath = Path(sys.argv[1])
-    if not filepath.exists():
-        print(f"Error: file not found — {filepath}")
-        sys.exit(1)
+    print(f"\n  Sample values: {df[col].iloc[:3].tolist()}")
+    print()
+    print("  Enter the strptime format, or press Enter to let pandas infer it.")
+    print("  Examples:")
+    print("    %Y-%m-%d %H:%M:%S.%f    →  2026-02-10 21:00:02.123456")
+    print("    %Y/%m/%d %H:%M          →  2026/02/10 21:00")
+    print("    %d-%b-%Y %H:%M:%S       →  10-Feb-2026 21:00:02")
 
+    fmt_raw = input("  Format string [infer]: ").strip()
+    fmt = fmt_raw if fmt_raw else None
+    cfg = TimestampConfig("single", col=col, fmt=fmt)
+    return cfg.apply(df), cfg
+
+
+# ── Shared assembly ───────────────────────────────────────────────────────────
+
+def prompt_timeshift() -> float:
+    """Ask the user for a time shift in seconds. Returns 0.0 if skipped."""
+    print("\n  Shift every timestamp by a fixed number of seconds.")
+    print("  Positive = shift forward, negative = shift backward.")
+    print("  Press Enter to skip (no shift).")
+    raw = input("  Seconds to shift [0]: ").strip()
+    if raw == "":
+        return 0.0
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"  Could not parse '{raw}' as a number — no shift applied.")
+        return 0.0
+
+
+def assemble(
+    df: pd.DataFrame,
+    col_map: dict[str, str],
+    ts: "pd.Series",
+    shift_sec: float,
+) -> pd.DataFrame:
+    """
+    Build the final clean DataFrame from the raw df, column map,
+    parsed timestamp series, and optional time shift.
+    """
+    df_clean = df[list(col_map.keys())].copy()
+    df_clean.rename(columns=col_map, inplace=True)
+
+    for col in df_clean.columns:
+        df_clean[col] = pd.to_numeric(df_clean[col], errors="coerce")
+
+    df_clean.insert(0, "TIMESTAMP", ts.values)
+    df_clean.set_index("TIMESTAMP", inplace=True)
+    df_clean.index.name = "TIMESTAMP"
+
+    df_clean = df_clean[~df_clean.index.isna()]
+    df_clean = df_clean[~df_clean.index.duplicated(keep="first")]
+    df_clean.sort_index(inplace=True)
+
+    if shift_sec != 0.0:
+        df_clean.index = (
+            pd.to_datetime(df_clean.index)
+            + pd.to_timedelta(shift_sec, unit="s")
+        )
+        print(f"  Shifted by {shift_sec:+g} seconds.")
+
+    df_clean.index = pd.to_datetime(df_clean.index).strftime("%Y-%m-%d %H:%M:%S.%f")
+    return df_clean
+
+
+def save(df_clean: pd.DataFrame, default_out: str) -> None:
+    out_path = Path(prompt("  Output file path", default_out))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df_clean.to_csv(out_path)
+    print(f"  ✓  Saved → {out_path}")
+
+
+# ── Single-file mode ──────────────────────────────────────────────────────────
+
+def run_single(filepath: Path) -> None:
     print(f"\n{'═' * 60}")
-    print(f"  Picarro Cleaner")
+    print(f"  Picarro Cleaner — Single File")
     print(f"  File: {filepath.name}")
     print(f"{'═' * 60}")
 
-    # ── Step 1: Header skip ───────────────────────────────────────────────────
-    section("STEP 1 of 3 — Header Lines")
-
-    # Peek at first 10 lines so the user can see the structure
+    # Step 1: Header skip
+    section("STEP 1 of 4 — Header Lines")
     print("\n  First 10 lines of the file:\n")
-    max_content = 72  # chars of line content before truncating
+    _peek(filepath)
+
+    print("\n  How many lines should be skipped before the column-name row?")
+    print("  (e.g. if row 0 is already the header, enter 0)")
+    skiprows = prompt_int("  Lines to skip", default=0)
+
+    try:
+        df = read_with_skip(filepath, skiprows)
+    except Exception as e:
+        print(f"\n  Error reading file: {e}")
+        sys.exit(1)
+
+    print(f"\n  Read {len(df):,} rows, {len(df.columns)} columns.")
+    print(f"  Column names detected: {df.columns.tolist()}")
+
+    # Step 2: Column selection
+    section("STEP 2 of 4 — Data Columns to Keep")
+    col_map = select_columns(df)
+
+    # Step 3: Timestamp
+    ts, cfg = build_timestamp(df)
+
+    # Step 4: Time shift
+    section("STEP 4 of 4 — Time Shift")
+    shift_sec = prompt_timeshift()
+
+    # Assemble
+    df_clean = assemble(df, col_map, ts, shift_sec)
+
+    print(f"\n  ✓  {len(df_clean):,} rows × {len(df_clean.columns)} columns")
+    print(f"     Time range: {df_clean.index[0]}  →  {df_clean.index[-1]}")
+
+    # Output
+    section("OUTPUT")
+    save(df_clean, filepath.stem + "_clean.csv")
+    print()
+
+
+# ── Batch directory mode ──────────────────────────────────────────────────────
+
+def run_batch(dirpath: Path) -> None:
+    # Collect all files in the directory (non-recursive), sorted
+    candidates = sorted(
+        p for p in dirpath.iterdir()
+        if p.is_file() and not p.name.startswith(".")
+    )
+    if not candidates:
+        print(f"Error: no files found in {dirpath}")
+        sys.exit(1)
+
+    print(f"\n{'═' * 60}")
+    print(f"  Picarro Cleaner — Batch Mode")
+    print(f"  Directory : {dirpath}")
+    print(f"  Files found ({len(candidates)}):")
+    for p in candidates:
+        print(f"    {p.name}")
+    print(f"{'═' * 60}")
+
+    # ── Configure once using the first file ───────────────────────────────────
+    first = candidates[0]
+    print(f"\n  Using '{first.name}' to configure shared settings.\n")
+
+    section("STEP 1 of 3 — Header Lines  (applies to all files)")
+    print("\n  First 10 lines of the file:\n")
+    _peek(first)
+
+    print("\n  How many lines should be skipped before the column-name row?")
+    print("  (e.g. if row 0 is already the header, enter 0)")
+    skiprows = prompt_int("  Lines to skip", default=0)
+
+    try:
+        df_first = read_with_skip(first, skiprows)
+    except Exception as e:
+        print(f"\n  Error reading file: {e}")
+        sys.exit(1)
+
+    print(f"\n  Read {len(df_first):,} rows, {len(df_first.columns)} columns.")
+    print(f"  Column names detected: {df_first.columns.tolist()}")
+
+    section("STEP 2 of 3 — Data Columns to Keep  (applies to all files)")
+    col_map = select_columns(df_first)
+
+    section("STEP 3 of 3 — Timestamp Format  (applies to all files)")
+    ts_first, ts_cfg = build_timestamp(df_first)
+
+    # Ask where to put the output files
+    print()
+    default_out_dir = str(dirpath / "cleaned")
+    out_dir = Path(prompt("\n  Output directory for all cleaned files", default_out_dir))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Per-file loop ─────────────────────────────────────────────────────────
+    print(f"\n{'═' * 60}")
+    print(f"  Processing {len(candidates)} file(s)  →  {out_dir}")
+    print(f"{'═' * 60}")
+
+    for i, filepath in enumerate(candidates, 1):
+        print(f"\n  [{i}/{len(candidates)}]  {filepath.name}")
+
+        try:
+            df = read_with_skip(filepath, skiprows)
+        except Exception as e:
+            print(f"    [skip] Could not read file: {e}")
+            continue
+
+        try:
+            ts = ts_cfg.apply(df)
+            ts = pd.to_datetime(ts, errors="coerce")
+            if hasattr(ts.dt, "tz") and ts.dt.tz is not None:
+                ts = ts.dt.tz_localize(None)
+        except Exception as e:
+            print(f"    [skip] Timestamp error: {e}")
+            continue
+
+        raw = input(f"    Time shift in seconds [0]: ").strip()
+        try:
+            shift_sec = float(raw) if raw else 0.0
+        except ValueError:
+            print(f"    Could not parse '{raw}' — no shift applied.")
+            shift_sec = 0.0
+
+        try:
+            df_clean = assemble(df, col_map, ts, shift_sec)
+        except Exception as e:
+            print(f"    [skip] Assembly error: {e}")
+            continue
+
+        out_path = out_dir / (filepath.stem + "_clean.csv")
+        df_clean.to_csv(out_path)
+        print(f"    ✓  {len(df_clean):,} rows  →  {out_path.name}")
+
+    print(f"\n  ✓  Batch complete. Files written to {out_dir}\n")
+
+
+
+# ── Peek helper ───────────────────────────────────────────────────────────────
+
+def _peek(filepath: Path) -> None:
+    max_content = 72
     with open(filepath) as f:
         for i, line in enumerate(f):
             if i >= 10:
@@ -243,53 +522,26 @@ def main():
             print(f"  {i:>3}  {content}")
     print()
 
-    print("\n  How many lines should be skipped before the column-name row?")
-    print("  (e.g. if row 0 is already the header, enter 0)")
-    skiprows = prompt_int("  Lines to skip", default=0)
 
-    # Try to read with that skip value
-    try:
-        df = read_with_skip(filepath, skiprows)
-    except Exception as e:
-        print(f"\n  Error reading file: {e}")
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  python clean.py <input_file.dat>     — single file")
+        print("  python clean.py <directory/>         — batch all files in dir")
         sys.exit(1)
 
-    print(f"\n  Read {len(df):,} rows, {len(df.columns)} columns.")
-    print(f"  Column names detected: {df.columns.tolist()}")
+    target = Path(sys.argv[1])
 
-    # ── Step 2: Column selection ──────────────────────────────────────────────
-    section("STEP 2 of 3 — Data Columns to Keep")
-    keep_cols = select_columns(df)
+    if not target.exists():
+        print(f"Error: path not found — {target}")
+        sys.exit(1)
 
-    # ── Step 3: Timestamp ─────────────────────────────────────────────────────
-    ts = build_timestamp(df)
-
-    # ── Assemble clean DataFrame ──────────────────────────────────────────────
-    df_clean = df[keep_cols].copy()
-
-    for col in df_clean.columns:
-        df_clean[col] = pd.to_numeric(df_clean[col], errors="coerce")
-
-    df_clean.insert(0, "TIMESTAMP", ts.values)
-    df_clean.set_index("TIMESTAMP", inplace=True)
-    df_clean.index.name = "TIMESTAMP"
-
-    # Drop unparseable timestamps and duplicates
-    df_clean = df_clean[~df_clean.index.isna()]
-    df_clean = df_clean[~df_clean.index.duplicated(keep="first")]
-    df_clean.sort_index(inplace=True)
-
-    print(f"\n  ✓  Clean DataFrame ready: {len(df_clean):,} rows × {len(df_clean.columns)} columns")
-    print(f"     Columns: {df_clean.columns.tolist()}")
-    print(f"     Time range: {df_clean.index[0]}  →  {df_clean.index[-1]}")
-
-    # ── Output ────────────────────────────────────────────────────────────────
-    section("OUTPUT")
-    default_out = filepath.stem + "_clean.csv"
-    out_path = Path(prompt("  Output file path", default_out))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df_clean.to_csv(out_path)
-    print(f"\n  ✓  Saved → {out_path}\n")
+    if target.is_dir():
+        run_batch(target)
+    else:
+        run_single(target)
 
 
 if __name__ == "__main__":
