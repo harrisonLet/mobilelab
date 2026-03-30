@@ -40,11 +40,6 @@ import pandas as pd
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def load_csv(path: Path, ch4_col: str) -> tuple[list[str], list[float]]:
-    """
-    Load a cleaned CSV (TIMESTAMP index), return (timestamps, ch4_values)
-    as plain Python lists for JSON serialisation.
-    Timestamps are returned as ISO strings.
-    """
     df = pd.read_csv(path, index_col="TIMESTAMP")
     if ch4_col not in df.columns:
         raise KeyError(
@@ -53,12 +48,8 @@ def load_csv(path: Path, ch4_col: str) -> tuple[list[str], list[float]]:
         )
     df.index = pd.to_datetime(df.index, errors="coerce")
     df = df[~df.index.isna()].sort_index()
-    ts = df.index.strftime("%Y-%m-%dT%H:%M:%S.%f").tolist()
-    ch4 = (
-        pd.to_numeric(df[ch4_col], errors="coerce")
-        .fillna(value=0.0)
-        .tolist()
-    )    
+    ts  = df.index.strftime("%Y-%m-%dT%H:%M:%S.%f").tolist()
+    ch4 = pd.to_numeric(df[ch4_col], errors="coerce").fillna(0.0).tolist()
     return ts, ch4
 
 
@@ -78,45 +69,38 @@ def collect_aeris_files(aeris_path: Path) -> list[Path]:
         raise FileNotFoundError(f"Aeris path not found: {aeris_path}")
 
 
-# ── HTML template ─────────────────────────────────────────────────────────────
+# ── HTML builder ──────────────────────────────────────────────────────────────
+# HTML and JS are plain strings — no Python .format() so no brace escaping.
 
-HTML_TEMPLATE = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>CH₄ Time Sync — Mobile Atmos</title>
-<script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+CSS = """\
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Syne:wght@400;600;700&display=swap');
 
-:root {{
-    --bg:         #0b0e14;
-    --panel:      #121826;
-    --panel-alt:  #0f1422;
-    --border:     #1f2937;
-    --text:       #e5e7eb;
-    --muted:      #9ca3af;
-    --accent:     #60a5fa;
-    --green:      #CFFF04;
-    --danger:     #fb7185;
-    --nav-bg:     #020617;
-}}
+:root {
+    --bg:        #0b0e14;
+    --panel:     #121826;
+    --panel-alt: #0f1422;
+    --border:    #1f2937;
+    --text:      #e5e7eb;
+    --muted:     #9ca3af;
+    --accent:    #60a5fa;
+    --green:     #CFFF04;
+    --danger:    #fb7185;
+    --nav-bg:    #020617;
+}
 
-*, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-body {{
+body {
     font-family: 'Syne', sans-serif;
     background: var(--bg);
     color: var(--text);
     min-height: 100vh;
     display: flex;
     flex-direction: column;
-}}
+}
 
-/* ── Nav ── */
-nav {{
+nav {
     background: var(--nav-bg);
     border-bottom: 1px solid var(--border);
     height: 56px;
@@ -127,9 +111,9 @@ nav {{
     position: sticky;
     top: 0;
     z-index: 100;
-}}
+}
 
-.nav-brand {{
+.nav-brand {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -137,30 +121,29 @@ nav {{
     color: var(--text);
     font-size: 1rem;
     font-weight: 600;
-}}
+}
 
-.nav-logo {{ height: 26px; }}
+.nav-logo { height: 26px; }
 
-.nav-links {{
+.nav-links {
     display: flex;
     gap: 4px;
     margin-left: auto;
     list-style: none;
-}}
+}
 
-.nav-links a {{
+.nav-links a {
     color: var(--muted);
     text-decoration: none;
     font-size: 0.875rem;
     padding: 6px 12px;
     border-radius: 4px;
     transition: color 0.15s, background 0.15s;
-}}
+}
 
-.nav-links a:hover {{ color: var(--text); background: var(--panel-alt); }}
+.nav-links a:hover { color: var(--text); background: var(--panel-alt); }
 
-/* ── Layout ── */
-.container {{
+.container {
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -169,10 +152,9 @@ nav {{
     max-width: 1600px;
     width: 100%;
     margin: 0 auto;
-}}
+}
 
-/* ── File header bar ── */
-.file-bar {{
+.file-bar {
     display: flex;
     align-items: center;
     gap: 12px;
@@ -180,48 +162,68 @@ nav {{
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 10px 16px;
-}}
+    flex-wrap: wrap;
+}
 
-.file-label {{
+.file-label {
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.8rem;
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.08em;
-}}
+}
 
-.file-name {{
+.file-name {
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.9rem;
     color: var(--accent);
     font-weight: 500;
-}}
+}
 
-.file-counter {{
-    margin-left: auto;
+.file-counter {
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.8rem;
     color: var(--muted);
-}}
+}
 
-/* ── Plot panel ── */
-.plot-panel {{
+.progress-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-left: auto;
+}
+
+.dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--border);
+    border: 1px solid var(--border);
+    transition: background 0.2s;
+    cursor: default;
+}
+
+.dot.done    { background: var(--accent); border-color: var(--accent); }
+.dot.current { background: var(--green);  border-color: var(--green);  box-shadow: 0 0 6px var(--green); }
+.dot.skipped { background: transparent;   border-color: var(--muted); }
+
+.plot-panel {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 8px;
     flex: 1;
     min-height: 0;
-}}
+}
 
-#chart {{
+#chart {
     width: 100%;
-    height: calc(100vh - 280px);
+    height: calc(100vh - 290px);
     min-height: 320px;
-}}
+}
 
-/* ── Controls ── */
-.controls {{
+.controls {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -230,78 +232,69 @@ nav {{
     align-items: center;
     gap: 24px;
     flex-wrap: wrap;
-}}
+}
 
-.control-group {{
+.control-group {
     display: flex;
     flex-direction: column;
     gap: 4px;
-}}
+}
 
-.control-label {{
+.control-label {
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.72rem;
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.07em;
-}}
+}
 
-.offset-display {{
+.offset-display {
     font-family: 'JetBrains Mono', monospace;
     font-size: 1.6rem;
     font-weight: 600;
     color: var(--green);
     min-width: 110px;
     line-height: 1;
-}}
+}
 
-.offset-display.negative {{ color: var(--danger); }}
+.offset-display.negative { color: var(--danger); }
 
-.slider-wrap {{
+.slider-wrap {
     display: flex;
     flex-direction: column;
     gap: 6px;
     flex: 1;
     min-width: 240px;
-}}
+}
 
-.slider-row {{
+.slider-row {
     display: flex;
     align-items: center;
     gap: 10px;
-}}
+}
 
-.slider-row label {{
+.slider-row label {
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.72rem;
     color: var(--muted);
     width: 52px;
     text-align: right;
-}}
+}
 
-input[type=range] {{
+input[type=range] {
     flex: 1;
     accent-color: var(--accent);
     height: 4px;
     cursor: pointer;
-}}
+}
 
-.nudge-group {{
+.nudge-group {
     display: flex;
     gap: 6px;
     align-items: center;
-}}
+}
 
-.nudge-group label {{
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.72rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
-    margin-right: 4px;
-}}
-
-button {{
+button {
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.8rem;
     padding: 6px 12px;
@@ -311,66 +304,86 @@ button {{
     color: var(--text);
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s, color 0.15s;
-}}
+}
 
-button:hover {{ background: var(--border); }}
+button:hover { background: var(--border); }
 
-.btn-accent {{
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--nav-bg);
-    font-weight: 600;
-}}
-
-.btn-accent:hover {{ background: #93c5fd; border-color: #93c5fd; }}
-
-.btn-confirm {{
+.btn-confirm {
     background: var(--green);
     border-color: var(--green);
     color: var(--nav-bg);
     font-weight: 600;
-}}
+}
 
-.btn-confirm:hover {{ background: #e8ff5a; border-color: #e8ff5a; }}
+.btn-confirm:hover { background: #e8ff5a; border-color: #e8ff5a; }
 
-.btn-danger {{
+.btn-skip {
     border-color: var(--danger);
     color: var(--danger);
-}}
+}
 
-.btn-danger:hover {{ background: rgba(251,113,133,0.12); }}
+.btn-skip:hover { background: rgba(251,113,133,0.12); }
 
-/* ── Progress dots ── */
-.progress-row {{
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    flex-wrap: wrap;
-}}
+.btn-download {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--nav-bg);
+    font-weight: 600;
+}
 
-.dot {{
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--border);
-    border: 1px solid var(--border);
-    transition: background 0.2s;
-}}
+.btn-download:hover { background: #93c5fd; border-color: #93c5fd; }
 
-.dot.done {{ background: var(--accent); border-color: var(--accent); }}
-.dot.current {{ background: var(--green); border-color: var(--green); box-shadow: 0 0 6px var(--green); }}
-.dot.skipped {{ background: transparent; border-color: var(--muted); }}
-
-/* ── Actions row ── */
-.actions-row {{
+.actions-row {
     display: flex;
     gap: 10px;
     align-items: center;
     margin-left: auto;
-}}
+}
 
-/* ── Toast ── */
-#toast {{
+#summaryPanel {
+    display: none;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px 24px;
+    gap: 16px;
+    flex-direction: column;
+}
+
+#summaryPanel h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.summary-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+}
+
+.summary-table th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 4px 12px 8px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.summary-table td {
+    padding: 5px 12px 5px 0;
+    border-bottom: 1px solid rgba(31,41,55,0.5);
+    color: var(--text);
+}
+
+.offset-pos  { color: var(--green)  !important; }
+.offset-neg  { color: var(--danger) !important; }
+.offset-zero { color: var(--muted)  !important; }
+.cell-skip   { color: var(--muted)  !important; font-style: italic; }
+.cell-ok     { color: var(--accent) !important; }
+
+#toast {
     position: fixed;
     bottom: 24px;
     right: 24px;
@@ -385,394 +398,348 @@ button:hover {{ background: var(--border); }}
     pointer-events: none;
     transition: opacity 0.3s;
     z-index: 999;
-}}
+}
 
-#toast.show {{ opacity: 1; }}
+#toast.show { opacity: 1; }
+</style>"""
 
-/* ── Summary panel (shown when all done) ── */
-#summaryPanel {{
-    display: none;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 20px 24px;
-}}
-
-#summaryPanel h2 {{
-    font-size: 1rem;
-    font-weight: 600;
-    margin-bottom: 14px;
-    color: var(--text);
-}}
-
-.summary-table {{
-    width: 100%;
-    border-collapse: collapse;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.82rem;
-}}
-
-.summary-table th {{
-    text-align: left;
-    color: var(--muted);
-    font-weight: 500;
-    padding: 4px 12px 8px 0;
-    border-bottom: 1px solid var(--border);
-}}
-
-.summary-table td {{
-    padding: 5px 12px 5px 0;
-    border-bottom: 1px solid rgba(31,41,55,0.5);
-    color: var(--text);
-}}
-
-.summary-table td.offset-pos {{ color: var(--green); }}
-.summary-table td.offset-neg {{ color: var(--danger); }}
-.summary-table td.offset-zero {{ color: var(--muted); }}
-.summary-table td.skipped {{ color: var(--muted); font-style: italic; }}
-</style>
-</head>
-<body>
-
+BODY_HTML = """\
 <nav>
-    <a href="/~u1460207/dashboard/" class="nav-brand">
-        <img src="/~u1460207/src/BlockU_RGB.png" alt="U" class="nav-logo">
-        CH₄ Time Sync
-    </a>
-    <ul class="nav-links">
-        <li><a href="/~u1460207/dashboard/">Home</a></li>
-        <li><a href="/~u1460207/dashboard/viewer/">Map Viewer</a></li>
-        <li><a href="/~u1460207/dashboard/analysis/">Analysis</a></li>
-        <li><a href="/~u1460207/dashboard/about/">About</a></li>
-    </ul>
+  <a href="/~u1460207/dashboard/" class="nav-brand">
+    <img src="/~u1460207/src/BlockU_RGB.png" alt="U" class="nav-logo">
+    CH&#8324; Time Sync
+  </a>
+  <ul class="nav-links">
+    <li><a href="/~u1460207/dashboard/">Home</a></li>
+    <li><a href="/~u1460207/dashboard/viewer/">Map Viewer</a></li>
+    <li><a href="/~u1460207/dashboard/analysis/">Analysis</a></li>
+    <li><a href="/~u1460207/dashboard/about/">About</a></li>
+  </ul>
 </nav>
 
 <div class="container">
 
-    <!-- File header -->
-    <div class="file-bar">
-        <span class="file-label">Aeris file</span>
-        <span class="file-name" id="fileName">—</span>
-        <span class="file-counter" id="fileCounter"></span>
-        <div class="progress-row" id="progressDots"></div>
+  <div class="file-bar">
+    <span class="file-label">Aeris file</span>
+    <span class="file-name" id="fileName">&#8212;</span>
+    <span class="file-counter" id="fileCounter"></span>
+    <div class="progress-row" id="progressDots"></div>
+  </div>
+
+  <div class="plot-panel">
+    <div id="chart"></div>
+  </div>
+
+  <div class="controls" id="controlsPanel">
+    <div class="control-group">
+      <span class="control-label">Offset (s)</span>
+      <div class="offset-display" id="offsetDisplay">+0.0 s</div>
     </div>
-
-    <!-- Chart -->
-    <div class="plot-panel">
-        <div id="chart"></div>
+    <div class="slider-wrap">
+      <div class="slider-row">
+        <label>Coarse</label>
+        <input type="range" id="sliderCoarse" min="-120" max="120" step="1" value="0">
+      </div>
+      <div class="slider-row">
+        <label>Fine</label>
+        <input type="range" id="sliderFine" min="-5" max="5" step="0.1" value="0">
+      </div>
     </div>
-
-    <!-- Controls -->
-    <div class="controls">
-
-        <div class="control-group">
-            <span class="control-label">Offset (s)</span>
-            <div class="offset-display" id="offsetDisplay">0.0</div>
-        </div>
-
-        <div class="slider-wrap">
-            <div class="slider-row">
-                <label>Coarse</label>
-                <input type="range" id="sliderCoarse" min="-120" max="120" step="1" value="0">
-            </div>
-            <div class="slider-row">
-                <label>Fine</label>
-                <input type="range" id="sliderFine" min="-5" max="5" step="0.1" value="0">
-            </div>
-        </div>
-
-        <div class="control-group">
-            <span class="control-label">Nudge</span>
-            <div class="nudge-group">
-                <button onclick="nudge(-10)">−10s</button>
-                <button onclick="nudge(-1)">−1s</button>
-                <button onclick="nudge(-0.1)">−0.1s</button>
-                <button onclick="nudge(0.1)">+0.1s</button>
-                <button onclick="nudge(1)">+1s</button>
-                <button onclick="nudge(10)">+10s</button>
-            </div>
-        </div>
-
-        <div class="actions-row">
-            <button class="btn-danger" onclick="skipFile()">Skip</button>
-            <button onclick="resetOffset()">Reset</button>
-            <button class="btn-confirm" onclick="confirmOffset()">Confirm ✓</button>
-        </div>
-
+    <div class="control-group">
+      <span class="control-label">Nudge</span>
+      <div class="nudge-group">
+        <button onclick="nudge(-10)">&#8722;10s</button>
+        <button onclick="nudge(-1)">&#8722;1s</button>
+        <button onclick="nudge(-0.1)">&#8722;0.1s</button>
+        <button onclick="nudge(0.1)">+0.1s</button>
+        <button onclick="nudge(1)">+1s</button>
+        <button onclick="nudge(10)">+10s</button>
+      </div>
     </div>
-
-    <!-- Summary (shown after all files done) -->
-    <div id="summaryPanel">
-        <h2>All files reviewed — offsets.json</h2>
-        <table class="summary-table">
-            <thead>
-                <tr>
-                    <th>File</th>
-                    <th>Offset (s)</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody id="summaryBody"></tbody>
-        </table>
-        <br>
-        <button class="btn-accent" onclick="downloadOffsets()">⬇ Download offsets.json</button>
+    <div class="actions-row">
+      <button class="btn-skip" onclick="skipFile()">Skip</button>
+      <button onclick="resetOffset()">Reset</button>
+      <button class="btn-confirm" onclick="confirmOffset()">Confirm &#10003;</button>
     </div>
+  </div>
+
+  <div id="summaryPanel">
+    <h2>All files reviewed</h2>
+    <table class="summary-table">
+      <thead><tr><th>File</th><th>Offset (s)</th><th>Status</th></tr></thead>
+      <tbody id="summaryBody"></tbody>
+    </table>
+    <div>
+      <button class="btn-download" onclick="downloadOffsets()">&#11015; Download offsets.json</button>
+    </div>
+  </div>
 
 </div>
+<div id="toast"></div>"""
 
-<div id="toast"></div>
-
+JS_TEMPLATE = """\
 <script>
-// ── Data injected by sync.py ──────────────────────────────────────────────────
-const PICARRO = __PICARRO_JSON__;
-const AERIS_FILES = __AERIS_JSON__;
+const PICARRO    = PICARRO_DATA_PLACEHOLDER;
+const AERIS_FILES = AERIS_DATA_PLACEHOLDER;
 
-// ── State ─────────────────────────────────────────────────────────────────────
-let currentIdx = 0;
-let offsets = {};   // { filename: seconds | "skip" }
+let currentIdx    = 0;
+let offsets       = {};
 let currentOffset = 0;
 
-// ── Init ──────────────────────────────────────────────────────────────────────
 buildDots();
 loadFile(0);
 
-// ── Dot progress ──────────────────────────────────────────────────────────────
-function buildDots() {{
-    const row = document.getElementById('progressDots');
+function buildDots() {
+    var row = document.getElementById('progressDots');
     row.innerHTML = '';
-    AERIS_FILES.forEach((f, i) => {{
-        const d = document.createElement('div');
+    AERIS_FILES.forEach(function(f, i) {
+        var d = document.createElement('div');
         d.className = 'dot' + (i === 0 ? ' current' : '');
-        d.id = `dot_${{i}}`;
+        d.id = 'dot_' + i;
         d.title = f.name;
         row.appendChild(d);
-    }});
-}}
+    });
+}
 
-function updateDots() {{
-    AERIS_FILES.forEach((f, i) => {{
-        const d = document.getElementById(`dot_${{i}}`);
-        if (i === currentIdx) {{
+function updateDots() {
+    AERIS_FILES.forEach(function(f, i) {
+        var d = document.getElementById('dot_' + i);
+        if (i === currentIdx) {
             d.className = 'dot current';
-        }} else if (offsets[f.name] === 'skip') {{
+        } else if (offsets[f.name] === 'skip') {
             d.className = 'dot skipped';
-        }} else if (offsets[f.name] !== undefined) {{
+        } else if (offsets[f.name] !== undefined) {
             d.className = 'dot done';
-        }} else {{
+        } else {
             d.className = 'dot';
-        }}
-    }});
-}}
+        }
+    });
+}
 
-// ── File loading ──────────────────────────────────────────────────────────────
-function loadFile(idx) {{
-    if (idx >= AERIS_FILES.length) {{
-        showSummary();
-        return;
-    }}
-    currentIdx = idx;
+function loadFile(idx) {
+    if (idx >= AERIS_FILES.length) { showSummary(); return; }
+    currentIdx    = idx;
     currentOffset = 0;
     syncSliders();
     updateDots();
-
-    const f = AERIS_FILES[idx];
-    document.getElementById('fileName').textContent = f.name;
-    document.getElementById('fileCounter').textContent =
-        `${{idx + 1}} / ${{AERIS_FILES.length}}`;
-
+    var f = AERIS_FILES[idx];
+    document.getElementById('fileName').textContent    = f.name;
+    document.getElementById('fileCounter').textContent = (idx + 1) + ' / ' + AERIS_FILES.length;
     renderChart();
-}}
+}
 
-// ── Chart ─────────────────────────────────────────────────────────────────────
-function applyOffset(timestamps, offsetSec) {{
-    return timestamps.map(t => {{
-        const d = new Date(t);
+function applyOffset(timestamps, offsetSec) {
+    return timestamps.map(function(t) {
+        var d = new Date(t);
         d.setTime(d.getTime() + offsetSec * 1000);
         return d.toISOString();
-    }});
-}}
+    });
+}
 
-function renderChart() {{
-    const f = AERIS_FILES[currentIdx];
-    const shiftedTs = applyOffset(f.timestamps, currentOffset);
+function renderChart() {
+    var f = AERIS_FILES[currentIdx];
+    var shiftedTs = applyOffset(f.timestamps, currentOffset);
 
-    const tracePic = {{
+    var tracePic = {
         x: PICARRO.timestamps,
         y: PICARRO.ch4,
         type: 'scattergl',
         mode: 'lines',
-        line: {{ width: 1.5, color: '#60a5fa' }},
-        name: 'Picarro CH₄'
-    }};
+        line: { width: 1.5, color: '#60a5fa' },
+        name: 'Picarro CH4'
+    };
 
-    const traceAer = {{
+    var traceAer = {
         x: shiftedTs,
         y: f.ch4,
         type: 'scattergl',
         mode: 'lines',
-        line: {{ width: 1.5, color: '#CFFF04' }},
-        name: 'Aeris CH₄ (shifted)'
-    }};
+        line: { width: 1.5, color: '#CFFF04' },
+        name: 'Aeris CH4 (shifted)'
+    };
 
-    const layout = {{
+    var layout = {
         autosize: true,
         paper_bgcolor: '#121826',
         plot_bgcolor: '#020617',
-        font: {{ color: '#e5e7eb' }},
-        xaxis: {{
-            title: {{ text: 'Time (UTC)', font: {{ color: '#9ca3af' }} }},
-            tickfont: {{ color: '#9ca3af' }},
+        font: { color: '#e5e7eb' },
+        xaxis: {
+            title: { text: 'Time (UTC)', font: { color: '#9ca3af' } },
+            tickfont: { color: '#9ca3af' },
             gridcolor: '#1f2937',
-            zerolinecolor: '#1f2937',
-        }},
-        yaxis: {{
-            title: {{ text: 'CH₄', font: {{ color: '#9ca3af' }} }},
-            tickfont: {{ color: '#9ca3af' }},
+            zerolinecolor: '#1f2937'
+        },
+        yaxis: {
+            title: { text: 'CH4 (ppm)', font: { color: '#9ca3af' } },
+            tickfont: { color: '#9ca3af' },
             gridcolor: '#1f2937',
-            zerolinecolor: '#1f2937',
-        }},
-        legend: {{
+            zerolinecolor: '#1f2937'
+        },
+        legend: {
             x: 0.01, y: 0.99,
             bgcolor: 'rgba(2,6,23,0.85)',
             bordercolor: '#1f2937',
             borderwidth: 1,
-            font: {{ color: '#e5e7eb', size: 12 }}
-        }},
-        margin: {{ l: 60, r: 30, t: 30, b: 50 }},
-    }};
+            font: { color: '#e5e7eb', size: 12 }
+        },
+        margin: { l: 65, r: 30, t: 30, b: 50 }
+    };
 
-    Plotly.react('chart', [tracePic, traceAer], layout, {{ responsive: true }});
-}}
+    Plotly.react('chart', [tracePic, traceAer], layout, { responsive: true });
+}
 
-function updateChart() {{
-    const f = AERIS_FILES[currentIdx];
-    const shiftedTs = applyOffset(f.timestamps, currentOffset);
-    Plotly.restyle('chart', {{ x: [shiftedTs] }}, [1]);
-}}
+function updateChart() {
+    var f = AERIS_FILES[currentIdx];
+    var shiftedTs = applyOffset(f.timestamps, currentOffset);
+    Plotly.restyle('chart', { x: [shiftedTs] }, [1]);
+}
 
-// ── Controls ──────────────────────────────────────────────────────────────────
-const sliderCoarse = document.getElementById('sliderCoarse');
-const sliderFine   = document.getElementById('sliderFine');
-const offsetDisplay = document.getElementById('offsetDisplay');
+var sliderCoarse  = document.getElementById('sliderCoarse');
+var sliderFine    = document.getElementById('sliderFine');
+var offsetDisplay = document.getElementById('offsetDisplay');
 
-sliderCoarse.addEventListener('input', () => {{
+sliderCoarse.addEventListener('input', function() {
     currentOffset = parseFloat(sliderCoarse.value) + parseFloat(sliderFine.value);
     refreshDisplay();
     updateChart();
-}});
+});
 
-sliderFine.addEventListener('input', () => {{
+sliderFine.addEventListener('input', function() {
     currentOffset = parseFloat(sliderCoarse.value) + parseFloat(sliderFine.value);
     refreshDisplay();
     updateChart();
-}});
+});
 
-function syncSliders() {{
-    // Decompose currentOffset into coarse + fine
-    const coarse = Math.round(currentOffset);
-    const fine = parseFloat((currentOffset - coarse).toFixed(1));
+function syncSliders() {
+    var coarse = Math.round(currentOffset);
+    var fine   = parseFloat((currentOffset - coarse).toFixed(1));
     sliderCoarse.value = Math.max(-120, Math.min(120, coarse));
     sliderFine.value   = Math.max(-5,   Math.min(5,   fine));
     refreshDisplay();
-}}
+}
 
-function refreshDisplay() {{
-    offsetDisplay.textContent = currentOffset.toFixed(1) + ' s';
-    offsetDisplay.className = 'offset-display' +
-        (currentOffset < 0 ? ' negative' : '');
-}}
+function refreshDisplay() {
+    var sign = currentOffset >= 0 ? '+' : '';
+    offsetDisplay.textContent = sign + currentOffset.toFixed(1) + ' s';
+    offsetDisplay.className   = 'offset-display' + (currentOffset < 0 ? ' negative' : '');
+}
 
-function nudge(delta) {{
+function nudge(delta) {
     currentOffset = parseFloat((currentOffset + delta).toFixed(2));
     syncSliders();
     updateChart();
-}}
+}
 
-function resetOffset() {{
+function resetOffset() {
     currentOffset = 0;
     syncSliders();
     updateChart();
-}}
+}
 
-function confirmOffset() {{
-    const name = AERIS_FILES[currentIdx].name;
+function confirmOffset() {
+    var name = AERIS_FILES[currentIdx].name;
     offsets[name] = parseFloat(currentOffset.toFixed(2));
-    toast(`Confirmed ${{name}}: ${{currentOffset >= 0 ? '+' : ''}}${{currentOffset.toFixed(1)}}s`);
+    var sign = currentOffset >= 0 ? '+' : '';
+    toast('Confirmed ' + name + ': ' + sign + currentOffset.toFixed(1) + 's');
     loadFile(currentIdx + 1);
-}}
+}
 
-function skipFile() {{
-    const name = AERIS_FILES[currentIdx].name;
+function skipFile() {
+    var name = AERIS_FILES[currentIdx].name;
     offsets[name] = 'skip';
-    toast(`Skipped ${{name}}`);
+    toast('Skipped ' + name);
     loadFile(currentIdx + 1);
-}}
+}
 
-// ── Summary + download ────────────────────────────────────────────────────────
-function showSummary() {{
-    document.querySelector('.plot-panel').style.display = 'none';
-    document.querySelector('.controls').style.display = 'none';
-    document.getElementById('summaryPanel').style.display = 'block';
+function showSummary() {
+    document.querySelector('.plot-panel').style.display  = 'none';
+    document.getElementById('controlsPanel').style.display = 'none';
+    var panel = document.getElementById('summaryPanel');
+    panel.style.display = 'flex';
 
-    const tbody = document.getElementById('summaryBody');
+    var tbody = document.getElementById('summaryBody');
     tbody.innerHTML = '';
 
-    AERIS_FILES.forEach(f => {{
-        const val = offsets[f.name];
-        const tr = document.createElement('tr');
+    AERIS_FILES.forEach(function(f) {
+        var val   = offsets[f.name];
+        var tr    = document.createElement('tr');
+        var nameTd = document.createElement('td');
+        var offTd  = document.createElement('td');
+        var statTd = document.createElement('td');
+        nameTd.textContent = f.name;
 
-        let offsetCell = '';
-        let statusCell = '';
+        if (val === 'skip') {
+            offTd.textContent  = '\u2014';
+            offTd.className    = 'cell-skip';
+            statTd.textContent = 'skipped';
+            statTd.className   = 'cell-skip';
+        } else if (val === undefined) {
+            offTd.textContent  = '\u2014';
+            offTd.className    = 'cell-skip';
+            statTd.textContent = 'not reviewed';
+            statTd.className   = 'cell-skip';
+        } else {
+            var sign = val >= 0 ? '+' : '';
+            offTd.textContent  = sign + val.toFixed(2);
+            offTd.className    = val > 0 ? 'offset-pos' : val < 0 ? 'offset-neg' : 'offset-zero';
+            statTd.textContent = 'confirmed';
+            statTd.className   = 'cell-ok';
+        }
 
-        if (val === 'skip') {{
-            offsetCell = `<td class="skipped">—</td>`;
-            statusCell = `<td class="skipped">skipped</td>`;
-        }} else if (val === undefined) {{
-            offsetCell = `<td class="skipped">—</td>`;
-            statusCell = `<td class="skipped">not reviewed</td>`;
-        }} else {{
-            const cls = val > 0 ? 'offset-pos' : val < 0 ? 'offset-neg' : 'offset-zero';
-            const sign = val >= 0 ? '+' : '';
-            offsetCell = `<td class="${{cls}}">${{sign}}${{val.toFixed(2)}}</td>`;
-            statusCell = `<td style="color:var(--accent)">confirmed</td>`;
-        }}
-
-        tr.innerHTML = `<td>${{f.name}}</td>${{offsetCell}}${{statusCell}}`;
+        tr.appendChild(nameTd);
+        tr.appendChild(offTd);
+        tr.appendChild(statTd);
         tbody.appendChild(tr);
-    }});
+    });
 
     updateDots();
-}}
+}
 
-function downloadOffsets() {{
-    // Build clean JSON — skip "skip" entries, use 0 for unreviewed
-    const result = {{}};
-    AERIS_FILES.forEach(f => {{
-        const val = offsets[f.name];
+function downloadOffsets() {
+    var result = {};
+    AERIS_FILES.forEach(function(f) {
+        var val = offsets[f.name];
         if (val === 'skip' || val === undefined) return;
         result[f.name] = val;
-    }});
-
-    const blob = new Blob([JSON.stringify(result, null, 2)], {{ type: 'application/json' }});
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
+    });
+    var blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' });
+    var url  = URL.createObjectURL(blob);
+    var a    = document.createElement('a');
     a.href     = url;
     a.download = 'offsets.json';
     a.click();
     URL.revokeObjectURL(url);
-}}
+}
 
-// ── Toast ─────────────────────────────────────────────────────────────────────
-function toast(msg) {{
-    const el = document.getElementById('toast');
+function toast(msg) {
+    var el = document.getElementById('toast');
     el.textContent = msg;
     el.classList.add('show');
-    setTimeout(() => el.classList.remove('show'), 2200);
-}}
+    setTimeout(function() { el.classList.remove('show'); }, 2200);
+}
 </script>
 </body>
-</html>
-"""
+</html>"""
+
+
+def build_html(picarro_json: str, aeris_json: str) -> str:
+    head = (
+        "<!DOCTYPE html>\n"
+        "<html lang='en'>\n"
+        "<head>\n"
+        "<meta charset='UTF-8'/>\n"
+        "<meta name='viewport' content='width=device-width, initial-scale=1.0'/>\n"
+        "<title>CH4 Time Sync - Mobile Atmos</title>\n"
+        "<script src='https://cdn.plot.ly/plotly-2.30.0.min.js'></script>\n"
+        + CSS + "\n"
+        "</head>\n"
+        "<body>\n"
+    )
+
+    js = JS_TEMPLATE.replace("PICARRO_DATA_PLACEHOLDER", picarro_json)
+    js = js.replace("AERIS_DATA_PLACEHOLDER", aeris_json)
+
+    return head + BODY_HTML + "\n" + js
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -797,58 +764,53 @@ def main():
 
     picarro_path = Path(args.picarro)
     aeris_path   = Path(args.aeris)
-    out_dir      = Path(args.out)
+    out_dir      = Path(args.out).expanduser()
 
     if not picarro_path.exists():
         print(f"Error: Picarro file not found — {picarro_path}")
         sys.exit(1)
 
-    # ── Load Picarro ──────────────────────────────────────────────────────────
+    # Load Picarro
     print(f"Loading Picarro: {picarro_path.name}  (col: '{args.pic_col}')")
     try:
         pic_ts, pic_ch4 = load_csv(picarro_path, args.pic_col)
     except KeyError as e:
         print(f"Error: {e}")
         sys.exit(1)
-    print(f"  {len(pic_ts):,} records  |  "
-          f"{pic_ts[0][:19]}  →  {pic_ts[-1][:19]}")
+    print(f"  {len(pic_ts):,} records  |  {pic_ts[0][:19]}  ->  {pic_ts[-1][:19]}")
 
-    # ── Load Aeris files ──────────────────────────────────────────────────────
+    # Load Aeris files
     aeris_files = collect_aeris_files(aeris_path)
     print(f"\nAeris files ({len(aeris_files)}):")
 
-    aeris_json_list = []
+    aeris_list = []
     for f in aeris_files:
         try:
             ts, ch4 = load_csv(f, args.aer_col)
-            aeris_json_list.append({
-                "name": f.name,
-                "timestamps": ts,
-                "ch4": ch4,
-            })
-            print(f"  ✓  {f.name}  ({len(ts):,} records)")
+            aeris_list.append({"name": f.name, "timestamps": ts, "ch4": ch4})
+            print(f"  ok  {f.name}  ({len(ts):,} records)")
         except Exception as e:
-            print(f"  ✗  {f.name}  skipped — {e}")
+            print(f"  !!  {f.name}  skipped -- {e}")
 
-    if not aeris_json_list:
+    if not aeris_list:
         print("Error: no Aeris files loaded successfully.")
         sys.exit(1)
 
-    # ── Write HTML ────────────────────────────────────────────────────────────
+    picarro_json = json.dumps({"timestamps": pic_ts, "ch4": pic_ch4})
+    aeris_json   = json.dumps(aeris_list)
+
+    html = build_html(picarro_json, aeris_json)
+
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "index.html"
-
-    picarro_json = json.dumps({"timestamps": pic_ts, "ch4": pic_ch4})
-    aeris_json   = json.dumps(aeris_json_list)
-
-    html = HTML_TEMPLATE.replace("__PICARRO_JSON__", picarro_json)
-    html = html.replace("__AERIS_JSON__", aeris_json)
-
     out_path.write_text(html, encoding="utf-8")
 
-    print(f"\n✓  Written → {out_path}")
-    print(f"\n   Open in browser:")
-    print(f"   https://home.chpc.utah.edu/~u1460207/{out_path.relative_to(Path.home() / 'public_html')}")
+    print(f"\nWritten -> {out_path}")
+    try:
+        rel = out_path.relative_to(Path.home() / "public_html")
+        print(f"Open:    https://home.chpc.utah.edu/~u1460207/{rel}")
+    except ValueError:
+        print(f"Open the file in your browser: {out_path}")
     print()
 
 

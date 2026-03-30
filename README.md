@@ -1,4 +1,4 @@
-# mobilelabs
+# mobilelab
 
 A Python toolkit for processing and analyzing mobile laboratory atmospheric measurement data.
 
@@ -9,7 +9,6 @@ A Python toolkit for processing and analyzing mobile laboratory atmospheric meas
 ## Installation
 
 Not ready for use
-
 
 ## Modules
 

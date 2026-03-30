@@ -75,7 +75,7 @@ def read_with_skip(filepath: Path, skiprows: int) -> pd.DataFrame:
         sep=",",
         engine="python",
         skiprows=skiprows,
-        na_values=["nan", "NaN", "NA", "", "
+        na_values=["nan", "NaN", "NA", ", "],
     )
     df.columns = [c.strip() for c in df.columns]
     return df
@@ -414,7 +414,7 @@ def run_single(filepath: Path) -> None:
 
 # ── Batch directory mode ──────────────────────────────────────────────────────
 
-def run_batch(dirpath: Path, offsets: dict[str, float] | None = None) -> None:
+def run_batch(dirpath: Path, o: dict[str, float] | None = None) -> None:
     # Collect all files in the directory (non-recursive), sorted
     candidates = sorted(
         p for p in dirpath.iterdir()
@@ -488,10 +488,10 @@ def run_batch(dirpath: Path, offsets: dict[str, float] | None = None) -> None:
             print(f"    [skip] Timestamp error: {e}")
             continue
 
-        # Use offsets.json value if available, otherwise prompt
-        if offsets and filepath.name in offsets:
-            shift_sec = float(offsets[filepath.name])
-            print(f"    Time shift from offsets.json: {shift_sec:+g}s")
+        # Use o.json value if available, otherwise prompt
+        if o and filepath.name in o:
+            shift_sec = float(o[filepath.name])
+            print(f"    Time shift from o.json: {shift_sec:+g}s")
         else:
             raw = input(f"    Time shift in seconds [0]: ").strip()
             try:
@@ -536,22 +536,22 @@ def main():
         print("Usage:")
         print("  python clean.py <input_file.dat>              — single file")
         print("  python clean.py <directory/>                  — batch, prompt per file")
-        print("  python clean.py <directory/> --offsets f.json — batch, offsets from JSON")
+        print("  python clean.py <directory/> --o f.json — batch, o from JSON")
         sys.exit(1)
 
-    # Parse --offsets flag if present
-    offsets: dict[str, float] = {}
+    # Parse --o flag if present
+    o: dict[str, float] = {}
     args = sys.argv[1:]
-    if "--offsets" in args:
-        idx = args.index("--offsets")
-        offsets_path = Path(args[idx + 1])
+    if "--o" in args:
+        idx = args.index("--o")
+        o_path = Path(args[idx + 1])
         args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
-        if not offsets_path.exists():
-            print(f"Error: offsets file not found — {offsets_path}")
+        if not o_path.exists():
+            print(f"Error: o file not found — {o_path}")
             sys.exit(1)
-        with open(offsets_path) as fh:
-            offsets = json.load(fh)
-        print(f"Loaded offsets for {len(offsets)} file(s) from {offsets_path.name}")
+        with open(o_path) as fh:
+            o = json.load(fh)
+        print(f"Loaded o for {len(o)} file(s) from {o_path.name}")
 
     target = Path(args[0])
 
@@ -560,7 +560,7 @@ def main():
         sys.exit(1)
 
     if target.is_dir():
-        run_batch(target, offsets=offsets)
+        run_batch(target, o=o)
     else:
         run_single(target)
 
