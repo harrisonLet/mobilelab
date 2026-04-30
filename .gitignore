@@ -1,1 +1,15 @@
+# data
 temp/
+slv_mobile_winter_processed/
+*.tar.gz
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# jupyter
+.ipynb_checkpoints/
+
+# os
+.DS_Store

@@ -1,25 +1,37 @@
 """
 clean.py
-----------------
-Interactive Picarro CSV cleaner.
+
+Interactive CSV cleaner for mobile lab instruments.
 
 Single file:
     python clean.py <input_file.dat>
 
-    Prompts for header skip, columns, timestamp format, time shift,
-    and output path.
+    Prompts for header skip, columns, timestamp format, and time shift.
 
-Batch directory:
+Batch directory — two modes:
+
+  Default (interactive):
     python clean.py <directory/>
 
-    Uses the first file in the directory to configure header skip,
-    columns, and timestamp format (same for all files), then prompts
-    for a per-file time shift and output path for each file.
+    Configures header skip, columns, and timestamp format once using the
+    first file, then processes all files, prompting for a per-file time
+    shift at each step.
+
+  JSON offset mode (-o):
+    python clean.py <directory/> -o offsets.json [-r rejected.json]
+
+    Same cleaning steps, but time shifts come from the JSON produced by
+    sync_offsets.ipynb instead of manual prompts. Files absent from the
+    JSON get a 0s shift. Files listed in the rejected JSON are skipped.
+
+    offsets.json  — dict mapping original filename -> seconds  e.g.
+                    {"Instrument_260203_172639.txt": 4.0, ...}
+    rejected.json — list of filenames to skip entirely e.g.
+                    ["Instrument_260205_181624.txt", ...]
 
 Output: cleaned CSV(s) with a single TIMESTAMP index and chosen columns,
         formatted as YYYY-MM-DD HH:MM:SS.ffffff.
 
-Harrison LeTourneau, U of Utah, 2026
 """
 
 import sys
@@ -70,13 +82,10 @@ def section(title: str):
 # ── Step 1: Read with user-specified header skip ──────────────────────────────
 
 def read_with_skip(filepath: Path, skiprows: int) -> pd.DataFrame:
-    df = pd.read_csv(
-        filepath,
-        sep=",",
-        engine="python",
-        skiprows=skiprows,
-        na_values=["nan", "NaN", "NA", ", "],
-    )
+    common = dict(engine="python", skiprows=skiprows, na_values=["nan", "NaN", "NA", ", "])
+    df = pd.read_csv(filepath, sep=",", **common)
+    if len(df.columns) == 1:
+        df = pd.read_csv(filepath, sep=r"\s+", **common)
     df.columns = [c.strip() for c in df.columns]
     return df
 
@@ -192,13 +201,13 @@ class TimestampConfig:
             raise ValueError(f"Unknown timestamp method: {self.method}")
 
 
-def build_timestamp(df: pd.DataFrame) -> tuple["pd.Series", TimestampConfig]:
+def build_timestamp(df: pd.DataFrame, label: str = "STEP 3 of 3 — Timestamp / Index") -> tuple["pd.Series", TimestampConfig]:
     """
     Interactively configure the timestamp.
     Returns (parsed Series, TimestampConfig) so the config can be
     replayed on other files without prompting again.
     """
-    section("STEP 3 of 3 — Timestamp / Index")
+    section(label)
 
     ts_keywords = ["date", "time", "epoch", "julian", "frac", "timestamp"]
     ts_cols = [
@@ -414,7 +423,15 @@ def run_single(filepath: Path) -> None:
 
 # ── Batch directory mode ──────────────────────────────────────────────────────
 
-def run_batch(dirpath: Path, o: dict[str, float] | None = None) -> None:
+def run_batch(
+    dirpath: Path,
+    offsets: dict[str, float] | None = None,
+    rejected: set[str] | None = None,
+) -> None:
+    # offsets=None  → interactive mode (prompt per file)
+    # offsets={}    → JSON mode but empty JSON; files get 0s shift silently
+    rejected = rejected or set()
+
     # Collect all files in the directory (non-recursive), sorted
     candidates = sorted(
         p for p in dirpath.iterdir()
@@ -424,16 +441,26 @@ def run_batch(dirpath: Path, o: dict[str, float] | None = None) -> None:
         print(f"Error: no files found in {dirpath}")
         sys.exit(1)
 
+    to_process = [p for p in candidates if p.name not in rejected]
+    skipped    = [p for p in candidates if p.name in rejected]
+
     print(f"\n{'═' * 60}")
-    print(f"  Picarro Cleaner — Batch Mode")
+    print(f"  Cleaner — Batch Mode")
     print(f"  Directory : {dirpath}")
-    print(f"  Files found ({len(candidates)}):")
-    for p in candidates:
-        print(f"    {p.name}")
+    print(f"  Files found  : {len(candidates)}")
+    print(f"  To process   : {len(to_process)}")
+    if skipped:
+        print(f"  Rejected (bad): {len(skipped)}")
+        for p in skipped:
+            print(f"    [skip] {p.name}")
     print(f"{'═' * 60}")
 
-    # ── Configure once using the first file ───────────────────────────────────
-    first = candidates[0]
+    if not to_process:
+        print("  Nothing to process after applying rejected list.")
+        return
+
+    # ── Configure once using the first non-rejected file ──────────────────────
+    first = to_process[0]
     print(f"\n  Using '{first.name}' to configure shared settings.\n")
 
     section("STEP 1 of 3 — Header Lines  (applies to all files)")
@@ -456,22 +483,29 @@ def run_batch(dirpath: Path, o: dict[str, float] | None = None) -> None:
     section("STEP 2 of 3 — Data Columns to Keep  (applies to all files)")
     col_map = select_columns(df_first)
 
-    section("STEP 3 of 3 — Timestamp Format  (applies to all files)")
-    ts_first, ts_cfg = build_timestamp(df_first)
+    ts_first, ts_cfg = build_timestamp(df_first, label="STEP 3 of 3 — Timestamp Format  (applies to all files)")
 
-    # Ask where to put the output files
+    # Ask where to put the output files and what suffix to use
     print()
     default_out_dir = str(dirpath / "cleaned")
     out_dir = Path(prompt("\n  Output directory for all cleaned files", default_out_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    print("\n  Output filename suffix appended to each file stem.")
+    print("  Examples:  _clean  →  myfile_clean.csv")
+    print("             _sync   →  myfile_sync.csv")
+    print("             (empty) →  myfile.csv")
+    out_suffix = prompt("  Suffix", "_clean")
+
     # ── Per-file loop ─────────────────────────────────────────────────────────
     print(f"\n{'═' * 60}")
-    print(f"  Processing {len(candidates)} file(s)  →  {out_dir}")
+    print(f"  Processing {len(to_process)} file(s)  →  {out_dir}")
     print(f"{'═' * 60}")
 
-    for i, filepath in enumerate(candidates, 1):
-        print(f"\n  [{i}/{len(candidates)}]  {filepath.name}")
+    n_written = 0
+    zero_all = False
+    for i, filepath in enumerate(to_process, 1):
+        print(f"\n  [{i}/{len(to_process)}]  {filepath.name}")
 
         try:
             df = read_with_skip(filepath, skiprows)
@@ -488,17 +522,26 @@ def run_batch(dirpath: Path, o: dict[str, float] | None = None) -> None:
             print(f"    [skip] Timestamp error: {e}")
             continue
 
-        # Use o.json value if available, otherwise prompt
-        if o and filepath.name in o:
-            shift_sec = float(o[filepath.name])
-            print(f"    Time shift from o.json: {shift_sec:+g}s")
+        # Use offsets JSON value if -o was given, otherwise prompt
+        if offsets is not None:
+            shift_sec = float(offsets.get(filepath.name, 0.0))
+            print(f"    Time shift: {shift_sec:+g}s (from JSON)")
+        elif zero_all:
+            shift_sec = 0.0
+            print(f"    Time shift: 0s (all remaining)")
         else:
-            raw = input(f"    Time shift in seconds [0]: ").strip()
-            try:
-                shift_sec = float(raw) if raw else 0.0
-            except ValueError:
-                print(f"    Could not parse '{raw}' — no shift applied.")
+            print(f"    Time shift in seconds [0]  (or 'a' to apply 0 to all remaining): ", end="", flush=True)
+            raw = input().strip()
+            if raw.lower() == "a":
+                zero_all = True
                 shift_sec = 0.0
+                print(f"    Applying 0s to all remaining files.")
+            else:
+                try:
+                    shift_sec = float(raw) if raw else 0.0
+                except ValueError:
+                    print(f"    Could not parse '{raw}' — no shift applied.")
+                    shift_sec = 0.0
 
         try:
             df_clean = assemble(df, col_map, ts, shift_sec)
@@ -506,11 +549,17 @@ def run_batch(dirpath: Path, o: dict[str, float] | None = None) -> None:
             print(f"    [skip] Assembly error: {e}")
             continue
 
-        out_path = out_dir / (filepath.stem + "_clean.csv")
+        out_path = out_dir / (filepath.stem + out_suffix + ".csv")
         df_clean.to_csv(out_path)
         print(f"    ✓  {len(df_clean):,} rows  →  {out_path.name}")
+        n_written += 1
 
-    print(f"\n  ✓  Batch complete. Files written to {out_dir}\n")
+    print(f"\n  ✓  Batch complete. {n_written} file(s) written to {out_dir}")
+    if skipped:
+        print(f"  ✗  {len(skipped)} file(s) skipped (rejected):")
+        for p in skipped:
+            print(f"       {p.name}")
+    print()
 
 
 
@@ -534,33 +583,63 @@ def _peek(filepath: Path) -> None:
 def main():
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python clean.py <input_file.dat>              — single file")
-        print("  python clean.py <directory/>                  — batch, prompt per file")
-        print("  python clean.py <directory/> --o f.json — batch, o from JSON")
+        print("  python clean.py <file>               — single file, interactive")
+        print("  python clean.py <dir/>               — batch, prompt for shift per file")
+        print("  python clean.py <dir/> -o shifts.json [-r bad.json]")
+        print("                                       — batch, shifts from JSON (no prompts)")
         sys.exit(1)
 
-    # Parse --o flag if present
-    o: dict[str, float] = {}
     args = sys.argv[1:]
-    if "--o" in args:
-        idx = args.index("--o")
-        o_path = Path(args[idx + 1])
-        args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
-        if not o_path.exists():
-            print(f"Error: o file not found — {o_path}")
+
+    def _pop_flag(*flags):
+        """Remove the first matching flag+value pair from args and return the value."""
+        for flag in flags:
+            if flag not in args:
+                continue
+            i = args.index(flag)
+            if i + 1 >= len(args):
+                print(f"Error: {flag} requires an argument.")
+                sys.exit(1)
+            val = args[i + 1]
+            args[:] = [a for j, a in enumerate(args) if j not in (i, i + 1)]
+            return val
+        return None
+
+    # -o / --offsets
+    offsets: dict[str, float] | None = None
+    offsets_arg = _pop_flag("-o")
+    if offsets_arg:
+        offsets_path = Path(offsets_arg)
+        if not offsets_path.exists():
+            print(f"Error: offsets file not found — {offsets_path}")
             sys.exit(1)
-        with open(o_path) as fh:
-            o = json.load(fh)
-        print(f"Loaded o for {len(o)} file(s) from {o_path.name}")
+        with open(offsets_path) as fh:
+            offsets = json.load(fh)
+        print(f"Loaded offsets for {len(offsets)} file(s) from {offsets_path.name}")
+
+    # -r / --rejected
+    rejected: set[str] = set()
+    rejected_arg = _pop_flag("-r")
+    if rejected_arg:
+        rejected_path = Path(rejected_arg)
+        if not rejected_path.exists():
+            print(f"Error: rejected file not found — {rejected_path}")
+            sys.exit(1)
+        with open(rejected_path) as fh:
+            rejected = set(json.load(fh))
+        print(f"Loaded {len(rejected)} rejected file(s) from {rejected_path.name}")
+
+    if not args:
+        print("Error: no target file or directory specified.")
+        sys.exit(1)
 
     target = Path(args[0])
-
     if not target.exists():
         print(f"Error: path not found — {target}")
         sys.exit(1)
 
     if target.is_dir():
-        run_batch(target, o=o)
+        run_batch(target, offsets=offsets, rejected=rejected)
     else:
         run_single(target)
 
